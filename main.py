@@ -23,7 +23,7 @@ load_dotenv()
 # Initialize FastAPI app
 app = FastAPI(
     title="Portfolio Project Request API",
-    description="API for submitting project and contact requests to Muhammad Ahmad's portfolio, storing data in MongoDB, and sending notifications via Resend.",
+    description="API for submitting project, hiring, and contact requests to Muhammad Ahmad's portfolio, storing data in MongoDB, and sending notifications via Resend.",
     version="1.0.0"
 )
 
@@ -80,6 +80,28 @@ class ProjectDetails(BaseModel):
             }
         }
 
+class HiringDetails(BaseModel):
+    clientType: str = "company"
+    companyName: str
+    positionTitle: str
+    budget: str
+    timeline: str
+    requirements: str
+    contactEmail: EmailStr
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "clientType": "company",
+                "companyName": "TechCorp",
+                "positionTitle": "Full Stack Developer",
+                "budget": "$80,000",
+                "timeline": "3 months",
+                "requirements": "Experience with React, Node.js, and MongoDB",
+                "contactEmail": "hr@techcorp.com"
+            }
+        }
+
 class ContactDetails(BaseModel):
     name: str
     email: EmailStr
@@ -104,6 +126,23 @@ def validate_project_details(details: ProjectDetails) -> None:
         raise HTTPException(status_code=400, detail="Company name is required for company client type")
     if details.clientType == "individual" and not details.clientName:
         raise HTTPException(status_code=400, detail="Client name is required for individual client type")
+
+# Helper function to validate hiring details
+def validate_hiring_details(details: HiringDetails) -> None:
+    if details.clientType != "company":
+        raise HTTPException(status_code=400, detail="Client type must be 'company' for hiring requests")
+    if not details.companyName.strip():
+        raise HTTPException(status_code=400, detail="Company name is required")
+    if not details.positionTitle.strip():
+        raise HTTPException(status_code=400, detail="Position title is required")
+    if not details.budget.strip():
+        raise HTTPException(status_code=400, detail="Budget is required")
+    if not details.timeline.strip():
+        raise HTTPException(status_code=400, detail="Timeline is required")
+    if not details.requirements.strip():
+        raise HTTPException(status_code=400, detail="Requirements are required")
+    if not details.contactEmail:
+        raise HTTPException(status_code=400, detail="Contact email is required")
 
 # Helper function to validate contact details
 def validate_contact_details(details: ContactDetails) -> None:
@@ -134,7 +173,7 @@ async def connect_to_mongodb():
     retry=retry_if_exception_type(Exception),
     before_sleep=lambda retry_state: logger.info(f"Retrying email send (attempt {retry_state.attempt_number})...")
 )
-async def send_email(details: Union[ProjectDetails, ContactDetails]) -> bool:
+async def send_email(details: Union[ProjectDetails, HiringDetails, ContactDetails]) -> bool:
     if not RESEND_API_KEY:
         logger.warning("Resend API key not set. Skipping email send.")
         return False
@@ -158,6 +197,23 @@ async def send_email(details: Union[ProjectDetails, ContactDetails]) -> bool:
                     f"<p><strong>Received At:</strong> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</p>"
                 )
             }
+        elif isinstance(details, HiringDetails):
+            email_content = {
+                "from": "onboarding@resend.dev",
+                "to": "ahmadrajpootr1@gmail.com",
+                "subject": "New Hiring Request from AI Assistant",
+                "html": (
+                    f"<h3>New Hiring Request</h3>"
+                    f"<p><strong>Client Type:</strong> {details.clientType}</p>"
+                    f"<p><strong>Company Name:</strong> {details.companyName}</p>"
+                    f"<p><strong>Position Title:</strong> {details.positionTitle}</p>"
+                    f"<p><strong>Budget:</strong> {details.budget}</p>"
+                    f"<p><strong>Timeline:</strong> {details.timeline}</p>"
+                    f"<p><strong>Requirements:</strong> {details.requirements}</p>"
+                    f"<p><strong>Contact Email:</strong> {details.contactEmail}</p>"
+                    f"<p><strong>Received At:</strong> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</p>"
+                )
+            }
         else:  # ContactDetails
             email_content = {
                 "from": "onboarding@resend.dev",
@@ -177,7 +233,7 @@ async def send_email(details: Union[ProjectDetails, ContactDetails]) -> bool:
         return True
     except Exception as e:
         logger.error(f"Resend error: {str(e)}")
-        if "403" in str(e).lower():
+        if "403" in datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'):
             logger.error("Resend 403 Forbidden: Check API key permissions or sender verification")
         raise
 
@@ -201,7 +257,7 @@ async def shutdown_event():
 @app.post(
     "/api/project-request",
     summary="Submit a project request",
-    description="Submit project or hiring details to Muhammad Ahmad. Stores data in MongoDB and sends an email notification.",
+    description="Submit project details to Muhammad Ahmad. Stores data in MongoDB and sends an email notification.",
     response_description="Confirmation message and request ID"
 )
 async def submit_project_request(details: ProjectDetails):
@@ -234,6 +290,49 @@ async def submit_project_request(details: ProjectDetails):
     except PyMongoError as e:
         logger.error(f"MongoDB error: {e}")
         raise HTTPException(status_code=500, detail="Failed to store project details")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred. Please try again or contact Muhammad directly at ahmadrajpootr1@gmail.com."
+        )
+
+@app.post(
+    "/api/hiring-request",
+    summary="Submit a hiring request",
+    description="Submit hiring details for a company looking to hire Muhammad Ahmad. Stores data in MongoDB and sends an email notification.",
+    response_description="Confirmation message and request ID"
+)
+async def submit_hiring_request(details: HiringDetails):
+    try:
+        # Validate input data
+        validate_hiring_details(details)
+
+        # Prepare data for MongoDB
+        hiring_data = details.model_dump()
+        hiring_data["created_at"] = datetime.now(timezone.utc)
+        hiring_data["type"] = "hiring_request"
+
+        # Store in MongoDB (async)
+        result = await collection.insert_one(hiring_data)
+        if not result.inserted_id:
+            raise PyMongoError("Failed to store hiring details in MongoDB")
+
+        # Send email notification
+        email_sent = await send_email(details)
+        if not email_sent:
+            logger.warning("Email notification failed to send")
+
+        return {
+            "message": "Hiring request sent to Muhammad Ahmad. He will contact you soon!",
+            "request_id": str(result.inserted_id),
+            "email_sent": email_sent
+        }
+    except HTTPException as e:
+        raise e
+    except PyMongoError as e:
+        logger.error(f"MongoDB error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to store hiring details")
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         raise HTTPException(
